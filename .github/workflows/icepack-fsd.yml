@@ -1,4 +1,4 @@
-name: Icepack FSD full-driver research
+name: Icepack FSD 24h summer-stress research
 on:
   workflow_dispatch:
   push:
@@ -50,6 +50,20 @@ jobs:
         run: |
           curl -fL --retry 2 --connect-timeout 30 https://zenodo.org/records/3728287/files/Icepack_data-20200326.tar.gz -o /tmp/icepack_data.tgz
           tar -xzf /tmp/icepack_data.tgz -C "$HOME"
+      - name: Configure 24-hour summer-season driver stress input
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path=Path("icepack/configuration/scripts/icepack_in")
+          s=path.read_text()
+          assert "    dt             = 3600.0" in s
+          assert "    npt            = 8760" in s
+          assert "    istep0         = 0" in s
+          s=s.replace("    dt             = 3600.0","    dt             = 86400.0")
+          s=s.replace("    npt            = 8760","    npt            = 24")
+          s=s.replace("    istep0         = 0","    istep0         = 180")
+          path.write_text(s)
+          PY
       - name: Setup official FSD smoke test
         working-directory: icepack
         run: ./icepack.setup --test smoke --mach travisCI --env gnu --testid fsd-research --pes 1x1 --set fsd12
@@ -59,6 +73,8 @@ jobs:
           case_dir=$(find . -maxdepth 1 -type d -name 'travisCI_gnu_smoke*fsd12*' -print -quit)
           test -n "$case_dir"
           cd "$case_dir"
+          printf '\n----- actual case namelist -----\n'
+          rg 'dt[[:space:]]*=|npt[[:space:]]*=|istep0[[:space:]]*=|tr_fsd[[:space:]]*=' icepack_in || true
           ./icepack.build
           ./icepack.submit
           printf '\n----- test_output -----\n'
