@@ -1,0 +1,77 @@
+name: Icepack FSD full-driver research
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  icepack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, corrected]
+    steps:
+      - name: Checkout research
+        uses: actions/checkout@v4
+      - name: Install official driver dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tcsh gfortran gcc make pkg-config netcdf-bin libnetcdf-dev libnetcdff-dev
+      - name: Clone pristine official Icepack
+        run: |
+          git clone --depth=1 https://github.com/CICE-Consortium/Icepack.git icepack
+          git -C icepack rev-parse HEAD | tee upstream-sha.txt
+      - name: Instrument only the FSD lateral-melt loop, and optionally correct it
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path=Path("icepack/columnphysics/icepack_therm_itd.F90")
+          data=path.read_text()
+          beginning=data.index("      subroutine lateral_melt (")
+          ending=data.index("      end subroutine lateral_melt", beginning)
+          part=data[beginning:ending]
+          old="                     subdt = MIN(subdt, dt)"
+          assert part.count(old)==1, "source changed; abort instead of patching wrong line"
+          if os.environ["VARIANT"]=="corrected":
+              part=part.replace(old,"                     subdt = MIN(subdt, dt - elapsed_t)")
+          diagnostic="""                     if (elapsed_t + subdt > dt + 1.0e-8_dbl_kind) then
+                        write(*,'(A,3(1X,ES18.10))') 'FSD_LATM_OVERSHOOT', elapsed_t, subdt, dt
+                     endif
+          """
+          part=part.replace("                     ! update fsd and elapsed time",diagnostic+"\n                     ! update fsd and elapsed time")
+          assert part.count("FSD_LATM_OVERSHOOT")==1
+          path.write_text(data[:beginning]+part+data[ending:])
+          PY
+      - name: Download officially referenced Icepack forcing dataset
+        run: |
+          curl -fL --retry 2 --connect-timeout 30 https://zenodo.org/records/3728287/files/Icepack_data-20200326.tar.gz -o /tmp/icepack_data.tgz
+          tar -xzf /tmp/icepack_data.tgz -C "$HOME"
+      - name: Setup official FSD smoke test
+        working-directory: icepack
+        run: ./icepack.setup --test smoke --mach travisCI --env gnu --testid fsd-research --pes 1x1 --set fsd12
+      - name: Build and run official driver
+        working-directory: icepack
+        run: |
+          case_dir=$(find . -maxdepth 1 -type d -name 'travisCI_gnu_smoke*fsd12*' -print -quit)
+          test -n "$case_dir"
+          cd "$case_dir"
+          ./icepack.build
+          ./icepack.submit
+          printf '\n----- test_output -----\n'
+          cat test_output
+          printf '\n----- overshoot diagnostics -----\n'
+          grep -R 'FSD_LATM_OVERSHOOT' logs/ || true
+      - name: Retain reproducibility logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsd-${{ matrix.variant }}-${{ github.run_id }}
+          path: |
+            upstream-sha.txt
+            icepack/travisCI_gnu_smoke*/test_output
+            icepack/travisCI_gnu_smoke*/logs/*
+          if-no-files-found: ignore
