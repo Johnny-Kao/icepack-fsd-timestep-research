@@ -42,6 +42,10 @@ jobs:
                         write(*,'(A,3(1X,ES18.10))') 'FSD_LATM_OVERSHOOT', elapsed_t, subdt, dt
                      endif
           """
+          part=part.replace("                     nsubt = nsubt + 1", """                     nsubt = nsubt + 1
+                     if (nsubt == 1) then
+                        write(*,'(A,3(1X,ES18.10))') 'FSD_LATM_ACTIVE', dt, wlat, rsiden(n)
+                     endif""")
           part=part.replace("                     ! update fsd and elapsed time",diagnostic+"\n                     ! update fsd and elapsed time")
           assert part.count("FSD_LATM_OVERSHOOT")==1
           path.write_text(data[:beginning]+part+data[ending:])
@@ -74,13 +78,21 @@ jobs:
           test -n "$case_dir"
           cd "$case_dir"
           printf '\n----- actual case namelist -----\n'
-          rg 'dt[[:space:]]*=|npt[[:space:]]*=|istep0[[:space:]]*=|tr_fsd[[:space:]]*=' icepack_in || true
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path("icepack_in").read_text()
+          for label in ("dt", "npt", "istep0", "tr_fsd"):
+              lines=[l.strip() for l in s.splitlines() if l.strip().startswith(label+" ")]
+              print(label, lines)
+              assert lines, "missing namelist "+label
+          assert "86400.0" in s and "tr_fsd" in s
+          PY
           ./icepack.build
           ./icepack.submit
           printf '\n----- test_output -----\n'
           cat test_output
           printf '\n----- overshoot diagnostics -----\n'
-          grep -R 'FSD_LATM_OVERSHOOT' logs/ || true
+          grep -R -E 'FSD_LATM_OVERSHOOT|FSD_LATM_ACTIVE' logs/ || true
       - name: Retain reproducibility logs
         if: always()
         uses: actions/upload-artifact@v4
